@@ -1,0 +1,130 @@
+import logging
+from contextlib import asynccontextmanager
+
+import httpx
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
+
+from app.api.v1.router import router as v1_router
+from app.core.config import settings
+from app.db.session import AsyncSessionLocal
+from app.observability.langfuse import LangfuseRequestMiddleware, flush, get_langfuse
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("tydline")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage application startup and shutdown lifecycle."""
+    yield
+    flush()
+
+
+def create_app() -> FastAPI:
+    """
+    Application factory for FastAPI.
+
+    Keeps construction logic isolated so we can reuse in tests,
+    ASGI servers, and serverless handlers.
+    """
+    is_production = settings.environment == "production"
+
+    app = FastAPI(
+        title=settings.app_name,
+        version="0.1.0",
+        lifespan=lifespan,
+        # Disable interactive docs in production
+        docs_url=None if is_production else "/docs",
+        redoc_url=None if is_production else "/redoc",
+        openapi_url=None if is_production else "/openapi.json",
+    )
+
+    # CORS — restrict to configured origins; empty list = same-origin only
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # Observability: trace every HTTP request in Langfuse (no-op if not configured)
+    if LangfuseRequestMiddleware is not None:
+        app.add_middleware(LangfuseRequestMiddleware)
+
+    # Register routers
+    app.include_router(v1_router)
+
+    @app.get("/health", tags=["health"])
+    async def health_check() -> dict[str, str]:
+        """
+        Basic health probe for Cloud Run / monitoring.
+        Checks DB connectivity, ShipsGo, Groq, and Langfuse.
+        """
+        db_status = "unknown"
+        shipsgo_status = "unknown"
+        groq_status = "unknown"
+
+        # DB
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(text("SELECT 1"))
+            db_status = "connected"
+        except Exception as exc:
+            logger.warning("Health check DB failed: %s", exc)
+            db_status = "error"
+
+        # ShipsGo
+        if settings.shipsgo_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(
+                        settings.shipsgo_api_base_url + "/health",
+                        timeout=3.0,
+                    )
+                shipsgo_status = "reachable" if resp.status_code < 500 else "error"
+            except Exception as exc:
+                logger.warning("Health check ShipsGo failed: %s", exc)
+                shipsgo_status = "error"
+        else:
+            shipsgo_status = "not_configured"
+
+        # Groq (optional, only if configured)
+        groq_api_key = getattr(settings, "groq_api_key", None)
+        if groq_api_key:
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(
+                        "https://api.groq.com/openai/v1/models",
+                        headers={"Authorization": f"Bearer {groq_api_key}"},
+                    )
+                groq_status = "reachable" if resp.status_code < 500 else "error"
+            except Exception as exc:
+                logger.warning("Health check Groq failed: %s", exc)
+                groq_status = "error"
+        else:
+            groq_status = "not_configured"
+
+        # Langfuse
+        langfuse_status = "configured" if get_langfuse() is not None else "not_configured"
+
+        overall = "ok" if db_status == "connected" else "degraded"
+
+        return {
+            "status": overall,
+            "environment": settings.environment,
+            "database": db_status,
+            "shipsgo_api": shipsgo_status,
+            "groq_api": groq_status,
+            "langfuse": langfuse_status,
+        }
+
+    return app
+
+
+app = create_app()
