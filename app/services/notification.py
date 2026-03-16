@@ -83,8 +83,67 @@ async def _send_email(recipient_email: str, subject: str, body: str) -> None:
 
 async def _send_whatsapp(phone_number: str, message: str) -> None:
     """
-    Send a text message via Meta WhatsApp Business API.
+    Send a text message via the WhatsApp proxy server.
+
+    Posts to the proxy using the same payload format it expects, authenticated
+    with WHATSAPP_WEBHOOK_SECRET.  Falls back to Meta's API directly if the
+    proxy URL is not configured.
     """
+    # --- Proxy path (preferred) -------------------------------------------
+    if settings.whatsapp_proxy_url and settings.whatsapp_webhook_secret:
+        from app.observability.langfuse import create_trace
+
+        trace = create_trace(
+            name="whatsapp_notification_sent",
+            metadata={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
+            tags=["notification", "whatsapp"],
+        )
+        span = None
+        if trace is not None:
+            try:
+                span = trace.start_observation(
+                    name="whatsapp_send_message",
+                    as_type="span",
+                    input={"phone_suffix": phone_number[-4:] if len(phone_number) >= 4 else "****"},
+                )
+            except Exception:
+                pass
+
+        payload: dict[str, Any] = {
+            "to": phone_number.lstrip("+"),
+            "message": {
+                "type": "text",
+                "content": message[:4096],
+            },
+        }
+
+        async def _post_proxy() -> httpx.Response:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                return await client.post(
+                    settings.whatsapp_proxy_url,
+                    headers={
+                        "X-Webhook-Secret": settings.whatsapp_webhook_secret,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+
+        resp = await with_retries(_post_proxy)
+        success = resp is not None and resp.is_success
+        if not success:
+            logger.warning("whatsapp proxy send failed or retries exhausted")
+        if span is not None:
+            try:
+                if success:
+                    span.update(output={"status": "sent"})
+                else:
+                    span.update(output={"status": "failed"}, level="ERROR", status_message="whatsapp proxy send failed")
+                span.end()
+            except Exception:
+                pass
+        return
+
+    # --- Direct Meta API fallback -----------------------------------------
     _placeholder = ("your-", "your_")
     if not (settings.whatsapp_access_token and settings.whatsapp_phone_number_id):
         return
@@ -110,7 +169,7 @@ async def _send_whatsapp(phone_number: str, message: str) -> None:
             pass
 
     url = f"https://graph.facebook.com/v19.0/{settings.whatsapp_phone_number_id}/messages"
-    payload: dict[str, Any] = {
+    meta_payload: dict[str, Any] = {
         "messaging_product": "whatsapp",
         "to": phone_number.lstrip("+"),
         "type": "text",
@@ -125,7 +184,7 @@ async def _send_whatsapp(phone_number: str, message: str) -> None:
                     "Authorization": f"Bearer {settings.whatsapp_access_token}",
                     "Content-Type": "application/json",
                 },
-                json=payload,
+                json=meta_payload,
             )
 
     resp = await with_retries(_post)

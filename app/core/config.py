@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     whatsapp_api_key: str | None = None
     whatsapp_access_token: str | None = None
     whatsapp_phone_number_id: str | None = None
+    whatsapp_webhook_secret: str | None = None
+    whatsapp_proxy_url: str | None = None
     sms_api_key: str | None = None
 
     # Groq (AI alert generation + agent)
