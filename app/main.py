@@ -93,6 +93,10 @@ def create_app() -> FastAPI:
             content={"detail": f"No route matched: {request.method} /{path}", "registered_webhook": "/api/v1/whatsapp/webhook"},
         )
 
+    @app.get("/", include_in_schema=False)
+    async def root():
+        return {"message": "Tydline backend is running"}
+
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:
         """
