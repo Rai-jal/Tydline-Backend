@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.logistics import run_agent
 from app.core.config import settings
 from app.db.session import get_db
-from app.models.orm import Shipment, User
+from app.models.orm import Shipment, User, UserWhatsAppPhone
 
 async def _extract_and_create_shipments(
     text: str, user: User, db: AsyncSession
@@ -62,18 +62,20 @@ async def _extract_and_create_shipments(
         select(Shipment).where(Shipment.user_id == user.id, or_(*filters))
     )).scalars().all()
 
-    existing_containers = {s.container_number for s in existing}
+    existing_containers = {s.container_number for s in existing if s.container_number}
     existing_bls = {s.bill_of_lading for s in existing if s.bill_of_lading}
 
+    # Create shipments for new container numbers (container_number is the tracking key)
     for container in containers:
         if container not in existing_containers:
-            s = Shipment(container_number=container, carrier=carrier, user_id=user.id, status="pending_approval")
-            db.add(s)
+            # Attach a BL if one was mentioned alongside this container
+            bl = bls[0] if bls else None
+            db.add(Shipment(container_number=container, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
 
+    # Create shipments for BL-only references (no container number yet)
     for bl in bls:
-        if bl not in existing_bls:
-            s = Shipment(bill_of_lading=bl, container_number=f"BL-{bl[:10]}", carrier=carrier, user_id=user.id, status="pending_approval")
-            db.add(s)
+        if bl not in existing_bls and not containers:
+            db.add(Shipment(container_number=None, bill_of_lading=bl, carrier=carrier, user_id=user.id, status="pending_approval"))
 
     await db.commit()
     return containers, bls
@@ -271,8 +273,14 @@ async def whatsapp_webhook(
             logger.info("Group message from ...%s (group %s)", sender_phone[-4:], msg.context.group_id)
 
         # --- User lookup by phone ----------------------------------------------
-        result = await db.execute(select(User).where(User.phone == sender_phone))
-        user = result.scalar_one_or_none()
+        wp_result = await db.execute(
+            select(UserWhatsAppPhone).where(UserWhatsAppPhone.phone == sender_phone)
+        )
+        wp_entry = wp_result.scalar_one_or_none()
+        user: User | None = None
+        if wp_entry:
+            user_result = await db.execute(select(User).where(User.id == wp_entry.user_id))
+            user = user_result.scalar_one_or_none()
 
         if user is None:
             logger.info("Unregistered phone %s — rejecting", sender_phone[-4:])

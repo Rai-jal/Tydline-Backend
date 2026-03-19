@@ -20,7 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.memory import add_memory
-from app.models.orm import InboundEmail, Shipment, User
+from app.models.orm import InboundEmail, Shipment, User, UserAuthorizedEmail
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,6 @@ async def process_inbound_email(
     body_html = (payload.get("HtmlBody") or "").strip() or None
     message_id = (payload.get("MessageID") or "").strip() or None
     from_name = (payload.get("FromName") or "").strip() or None
-    raw_headers = payload.get("Headers")
 
     # ------------------------------------------------------------------
     # 1. Deduplicate by MessageID
@@ -127,20 +126,49 @@ async def process_inbound_email(
     user: User | None = None
     match_method: str = "none"
 
-    # Extract the bare address from to_email (Postmark may include display name)
-    to_bare = to_email.strip().lower()
-    if "<" in to_bare:
-        to_bare = to_bare.split("<")[-1].rstrip(">").strip()
+    def _bare(addr: str) -> str:
+        addr = addr.strip().lower()
+        if "<" in addr:
+            addr = addr.split("<")[-1].rstrip(">").strip()
+        return addr
 
-    # 1. Try to match by tracking_email (To field)
-    if to_bare:
-        result = await session.execute(select(User).where(User.tracking_email == to_bare))
+    # Collect all recipient addresses from To, ToFull, Cc, CcFull
+    all_recipient_addresses: list[str] = []
+    for entry in payload.get("ToFull") or []:
+        if isinstance(entry, dict) and entry.get("Email"):
+            all_recipient_addresses.append(_bare(entry["Email"]))
+    for entry in payload.get("CcFull") or []:
+        if isinstance(entry, dict) and entry.get("Email"):
+            all_recipient_addresses.append(_bare(entry["Email"]))
+    # Also include the raw To string as fallback
+    if to_email:
+        all_recipient_addresses.append(_bare(to_email))
+
+    # 1. Try to match any recipient address against users.tracking_email
+    for addr in all_recipient_addresses:
+        if not addr:
+            continue
+        result = await session.execute(select(User).where(User.tracking_email == addr))
         user = result.scalar_one_or_none()
         if user is not None:
             match_method = "tracking_email"
-            logger.info("Inbound email matched user %s via tracking_email <%s>", user.id, to_bare)
+            logger.info("Inbound email matched user %s via tracking_email <%s>", user.id, addr)
+            break
 
-    # 2. Fall back to from_email → users.email
+    # 2. Check from_email against user_authorized_emails
+    if user is None and from_email:
+        auth_result = await session.execute(
+            select(UserAuthorizedEmail).where(UserAuthorizedEmail.email == from_email)
+        )
+        auth_entry = auth_result.scalar_one_or_none()
+        if auth_entry:
+            user_result = await session.execute(select(User).where(User.id == auth_entry.user_id))
+            user = user_result.scalar_one_or_none()
+            if user:
+                match_method = "authorized_email"
+                logger.info("Inbound email matched user %s via authorized_email <%s>", user.id, from_email)
+
+    # 3. Fall back to from_email → users.email
     if user is None and from_email:
         result = await session.execute(select(User).where(User.email == from_email))
         user = result.scalar_one_or_none()
@@ -174,6 +202,7 @@ async def process_inbound_email(
     # 4. Link containers to the user's shipments (by container number or BL)
     # ------------------------------------------------------------------
     matched_shipment_ids: list[str] = []
+    new_shipment_ids: list[str] = []
     if user and (container_numbers or bl_numbers):
         filters = []
         if container_numbers:
@@ -190,22 +219,40 @@ async def process_inbound_email(
         if matched_shipment_ids:
             logger.info("Email matched existing shipments: %s", matched_shipment_ids)
 
-        # Create shipments for containers not yet tracked
-        existing_containers = {s.container_number for s in shipments}
-        new_containers = [c for c in container_numbers if c not in existing_containers]
-        new_shipment_ids: list[str] = []
-        for container in new_containers:
-            new_shipment = Shipment(
-                container_number=container,
-                bill_of_lading=bl_numbers[0] if bl_numbers else None,
-                carrier=carrier,
-                user_id=user.id,
-                status="pending_approval",
-            )
-            session.add(new_shipment)
-            await session.flush()
-            new_shipment_ids.append(str(new_shipment.id))
-            logger.info("Created shipment %s (pending_approval) for container %s from inbound email", new_shipment.id, container)
+        # Create shipments for new container numbers
+        existing_containers = {s.container_number for s in shipments if s.container_number}
+        existing_bls = {s.bill_of_lading for s in shipments if s.bill_of_lading}
+
+        for container in container_numbers:
+            if container not in existing_containers:
+                bl = bl_numbers[0] if bl_numbers else None
+                new_shipment = Shipment(
+                    container_number=container,
+                    bill_of_lading=bl,
+                    carrier=carrier,
+                    user_id=user.id,
+                    status="pending_approval",
+                )
+                session.add(new_shipment)
+                await session.flush()
+                new_shipment_ids.append(str(new_shipment.id))
+                logger.info("Created shipment %s (pending_approval) for container %s from inbound email", new_shipment.id, container)
+
+        # BL-only shipments — no container number identified yet
+        if not container_numbers:
+            for bl in bl_numbers:
+                if bl not in existing_bls:
+                    new_shipment = Shipment(
+                        container_number=None,
+                        bill_of_lading=bl,
+                        carrier=carrier,
+                        user_id=user.id,
+                        status="pending_approval",
+                    )
+                    session.add(new_shipment)
+                    await session.flush()
+                    new_shipment_ids.append(str(new_shipment.id))
+                    logger.info("Created shipment %s (pending_approval) for BL %s from inbound email", new_shipment.id, bl)
 
         if new_shipment_ids:
             matched_shipment_ids.extend(new_shipment_ids)
@@ -227,7 +274,6 @@ async def process_inbound_email(
         carrier=carrier,
         email_summary=email_summary,
         matched_shipment_ids=matched_shipment_ids or None,
-        raw_headers=raw_headers,
         mem0_stored=False,
     )
     session.add(record)
@@ -257,4 +303,71 @@ async def process_inbound_email(
 
     await session.commit()
     await session.refresh(record)
+
+    # ------------------------------------------------------------------
+    # 7. Send confirmation email to the user
+    # ------------------------------------------------------------------
+    if user and new_shipment_ids:
+        try:
+            await _send_shipment_added_email(
+                to=user.email,
+                subject=subject or "(no subject)",
+                container_numbers=container_numbers,
+                bl_numbers=bl_numbers,
+                carrier=carrier,
+            )
+        except Exception:
+            logger.warning("Shipment confirmation email failed for user %s — continuing", user.id)
+
     return record
+
+
+async def _send_shipment_added_email(
+    to: str,
+    subject: str,
+    container_numbers: list[str],
+    bl_numbers: list[str],
+    carrier: str | None,
+) -> None:
+    from pathlib import Path
+    from app.core.config import settings
+    from app.services.email import send_email
+
+    template_path = Path(__file__).parent.parent.parent / "emails" / "shipment-added.html"
+    html = template_path.read_text()
+
+    dashboard_url = f"{settings.frontend_url}/dashboard/approvals"
+
+    html = html.replace("{{subject}}", subject)
+    html = html.replace("{{dashboard_url}}", dashboard_url)
+    html = html.replace("{{carrier}}", carrier or "")
+
+    if bl_numbers:
+        html = html.replace("{{bl_numbers}}", "<br>".join(bl_numbers))
+        html = html.replace("{{#if bl_numbers}}", "").replace("{{/if}}", "")
+    else:
+        # Remove the BL block
+        import re as _re
+        html = _re.sub(r"\{\{#if bl_numbers\}\}.*?\{\{/if\}\}", "", html, flags=_re.DOTALL)
+
+    if container_numbers:
+        html = html.replace("{{container_numbers}}", "<br>".join(container_numbers))
+        html = html.replace("{{#if container_numbers}}", "").replace("{{/if}}", "")
+    else:
+        import re as _re
+        html = _re.sub(r"\{\{#if container_numbers\}\}.*?\{\{/if\}\}", "", html, flags=_re.DOTALL)
+
+    if carrier:
+        html = html.replace("{{#if carrier}}", "").replace("{{/if}}", "")
+    else:
+        import re as _re
+        html = _re.sub(r"\{\{#if carrier\}\}.*?\{\{/if\}\}", "", html, flags=_re.DOTALL)
+
+    items = []
+    if bl_numbers:
+        items.append("BL: " + ", ".join(bl_numbers))
+    if container_numbers:
+        items.append("Containers: " + ", ".join(container_numbers))
+    text_body = f"Shipments added to your Tydline account (pending approval):\n\n" + "\n".join(items) + f"\n\nApprove at: {dashboard_url}"
+
+    await send_email(to=to, subject="Shipments added — pending approval", text_body=text_body, html_body=html)

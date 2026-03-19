@@ -36,6 +36,12 @@ class User(Base):
     notify_parties: Mapped[list["NotifyParty"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    whatsapp_phones: Mapped[list["UserWhatsAppPhone"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+    authorized_emails: Mapped[list["UserAuthorizedEmail"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class Shipment(Base):
@@ -44,7 +50,7 @@ class Shipment(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
-    container_number: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    container_number: Mapped[str | None] = mapped_column(String(32), index=True, nullable=True)
     bill_of_lading: Mapped[str | None] = mapped_column(String(64), nullable=True)
     carrier: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="created")
@@ -216,3 +222,49 @@ class InboundEmail(Base):
     )
 
     user: Mapped["User | None"] = relationship()
+
+
+class UserWhatsAppPhone(Base):
+    """
+    Maps WhatsApp phone numbers to user accounts.
+    One user can have multiple numbers (e.g. personal + work).
+    Each phone number can only belong to one user.
+    """
+
+    __tablename__ = "user_whatsapp_phones"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    phone: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="whatsapp_phones")
+
+
+class UserAuthorizedEmail(Base):
+    """
+    Maps authorized sender email addresses to user accounts.
+    Inbound emails from these addresses are attributed to the linked user.
+    Each email address can only belong to one user.
+    """
+
+    __tablename__ = "user_authorized_emails"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    user: Mapped["User"] = relationship(back_populates="authorized_emails")

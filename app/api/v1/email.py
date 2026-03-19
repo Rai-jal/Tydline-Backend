@@ -14,55 +14,16 @@ registered user by email address, extracts container numbers, links shipments,
 stores the record, and feeds context into Mem0 for the agent.
 """
 
-import base64
 import logging
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.db.session import get_db
 from app.services.email_ingest import process_inbound_email
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Auth — HTTP Basic Auth header verification
-# ---------------------------------------------------------------------------
-
-
-async def require_postmark_auth(
-    authorization: str | None = Header(None, alias="Authorization"),
-) -> None:
-    """
-    Verify Postmark inbound webhook via HTTP Basic Auth.
-    Skipped if POSTMARK_INBOUND_SECRET is not set (open in dev).
-    """
-    if not settings.postmark_inbound_secret:
-        return  # no secret configured — skip in dev
-
-    if not authorization or not authorization.startswith("Basic "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing or invalid Authorization header",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-    try:
-        decoded = base64.b64decode(authorization[6:]).decode()
-    except Exception:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Authorization header encoding",
-        )
-
-    if decoded != settings.postmark_inbound_secret:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid webhook credentials",
-        )
-
 
 # ---------------------------------------------------------------------------
 # Router
@@ -71,7 +32,6 @@ async def require_postmark_auth(
 router = APIRouter(
     prefix="/email",
     tags=["email"],
-    dependencies=[Depends(require_postmark_auth)],
 )
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db)]

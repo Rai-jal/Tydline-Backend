@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_auth_token
 from app.db.session import get_db
-from app.models.orm import User
+from app.models.orm import User, UserWhatsAppPhone
 
 logger = logging.getLogger(__name__)
 
@@ -97,43 +97,77 @@ async def set_tracking_email(
 
 
 @router.get("/whatsapp-phone", status_code=status.HTTP_200_OK)
-async def get_whatsapp_phone(current_user: CurrentUserDep) -> dict:
-    """Return the WhatsApp phone number associated with this account, if any."""
-    return {"phone": current_user.phone}
+async def get_whatsapp_phones(
+    db: DbSessionDep,
+    current_user: CurrentUserDep,
+) -> dict:
+    """Return all WhatsApp phone numbers associated with this account."""
+    result = await db.execute(
+        select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == current_user.id)
+    )
+    phones = [row.phone for row in result.scalars().all()]
+    return {"phones": phones}
 
 
 @router.post("/whatsapp-phone", status_code=status.HTTP_200_OK)
-async def set_whatsapp_phone(
+async def add_whatsapp_phone(
     payload: SetWhatsAppPhoneBody,
     db: DbSessionDep,
     current_user: CurrentUserDep,
 ) -> dict:
     """
-    Associate a WhatsApp phone number with this company account.
+    Add a WhatsApp phone number to this company account.
     The number must be in international format without '+' (e.g. 233XXXXXXXXX).
-    This is the number the company will use to chat with the Tydline agent on WhatsApp.
+    Multiple numbers can be associated with one account.
     """
     normalised = payload.phone.strip().lstrip("+")
 
     # Uniqueness check — each phone can only belong to one company
     result = await db.execute(
-        select(User).where(
-            User.phone == normalised,
-            User.id != current_user.id,
-        )
+        select(UserWhatsAppPhone).where(UserWhatsAppPhone.phone == normalised)
     )
-    if result.scalar_one_or_none() is not None:
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        if existing.user_id == current_user.id:
+            # Already registered to this user — return success
+            phones_result = await db.execute(
+                select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == current_user.id)
+            )
+            phones = [row.phone for row in phones_result.scalars().all()]
+            return {"user_id": str(current_user.id), "phones": phones}
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="This phone number is already associated with another account",
         )
 
-    current_user.phone = normalised
-    db.add(current_user)
+    db.add(UserWhatsAppPhone(user_id=current_user.id, phone=normalised))
     await db.commit()
-    await db.refresh(current_user)
 
-    return {
-        "user_id": str(current_user.id),
-        "phone": current_user.phone,
-    }
+    phones_result = await db.execute(
+        select(UserWhatsAppPhone).where(UserWhatsAppPhone.user_id == current_user.id)
+    )
+    phones = [row.phone for row in phones_result.scalars().all()]
+    return {"user_id": str(current_user.id), "phones": phones}
+
+
+@router.delete("/whatsapp-phone/{phone}", status_code=status.HTTP_200_OK)
+async def remove_whatsapp_phone(
+    phone: str,
+    db: DbSessionDep,
+    current_user: CurrentUserDep,
+) -> dict:
+    """Remove a WhatsApp phone number from this account."""
+    normalised = phone.strip().lstrip("+")
+    result = await db.execute(
+        select(UserWhatsAppPhone).where(
+            UserWhatsAppPhone.phone == normalised,
+            UserWhatsAppPhone.user_id == current_user.id,
+        )
+    )
+    entry = result.scalar_one_or_none()
+    if entry is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Phone number not found")
+
+    await db.delete(entry)
+    await db.commit()
+    return {"removed": normalised}
