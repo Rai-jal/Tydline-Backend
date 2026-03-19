@@ -28,6 +28,7 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application source (no venv, no .env — excluded by .dockerignore)
 COPY app ./app
+COPY emails ./emails
 
 # Non-root user for container security
 RUN useradd --no-create-home --shell /bin/false appuser
