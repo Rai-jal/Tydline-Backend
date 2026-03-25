@@ -11,6 +11,7 @@ from app.api.v1 import (
     coupons,
     dashboard,
     email,
+    internal,
     notify_parties,
     onboarding,
     payments,
@@ -32,3 +33,4 @@ router.include_router(shipments.router)
 router.include_router(agent.router)
 router.include_router(whatsapp.router)
 router.include_router(email.router)
+router.include_router(internal.router)
