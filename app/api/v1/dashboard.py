@@ -54,19 +54,36 @@ class DashboardShipmentsResponse(BaseModel):
 
 
 class ShipmentSubmit(BaseModel):
-    container_number: str
-    bill_of_lading: str | None = None
+    bill_of_lading: str
+    container_number: str | None = None
     carrier: str | None = None
+
+    @field_validator("bill_of_lading")
+    @classmethod
+    def validate_bill_of_lading(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("bill_of_lading must not be empty")
+        if len(v) > 64:
+            raise ValueError("bill_of_lading must be 64 characters or fewer")
+        return v.upper()
 
     @field_validator("container_number")
     @classmethod
-    def validate_container_number(cls, v: str) -> str:
+    def validate_container_number(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         normalised = v.strip().upper()
         if not _CONTAINER_RE.match(normalised):
             raise ValueError(
                 "container_number must be 4 letters followed by 7 digits (e.g. MSCU1234567)"
             )
         return normalised
+
+
+class ShipmentSubmitResponse(BaseModel):
+    id: uuid.UUID
+    status: str
 
 
 async def _get_user_shipments(user: User, db: AsyncSession) -> list[Shipment]:
@@ -128,17 +145,29 @@ async def list_approvals(
     return [ShipmentRead.model_validate(s) for s in all_shipments if _is_pending(s)]
 
 
-@router.post("/shipments/submit", response_model=ShipmentRead, status_code=status.HTTP_201_CREATED)
+@router.post("/shipments/submit", response_model=ShipmentSubmitResponse, status_code=status.HTTP_201_CREATED)
 async def submit_shipment(
     payload: ShipmentSubmit,
     db: DbSessionDep,
     current_user: CurrentUserDep,
-) -> ShipmentRead:
+) -> ShipmentSubmitResponse:
     """
     Submit a shipment for tracking.
     Creates it with pending_approval status — tracking begins after 3 days
     or immediately on manual approval.
     """
+    existing = await db.execute(
+        select(Shipment).where(
+            Shipment.user_id == current_user.id,
+            Shipment.bill_of_lading == payload.bill_of_lading,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A shipment with this bill of lading already exists",
+        )
+
     shipment = Shipment(
         container_number=payload.container_number,
         bill_of_lading=payload.bill_of_lading,
@@ -149,7 +178,7 @@ async def submit_shipment(
     db.add(shipment)
     await db.commit()
     await db.refresh(shipment)
-    return ShipmentRead.model_validate(shipment)
+    return ShipmentSubmitResponse(id=shipment.id, status=shipment.status)
 
 
 @router.post("/approvals/{shipment_id}/approve", response_model=ShipmentRead)
