@@ -83,16 +83,6 @@ def create_app() -> FastAPI:
     # Register routers
     app.include_router(v1_router)
 
-    # Catch-all: log unmatched routes clearly instead of silent 404
-    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
-    async def catch_all(path: str, request: Request):
-        from fastapi.responses import JSONResponse
-        logger.warning("No route matched: %s %s — check your proxy webhook URL", request.method, request.url)
-        return JSONResponse(
-            status_code=404,
-            content={"detail": f"No route matched: {request.method} /{path}", "registered_webhook": "/api/v1/whatsapp/webhook"},
-        )
-
     @app.get("/", include_in_schema=False)
     async def root():
         return {"message": "Tydline backend is running"}
@@ -157,6 +147,16 @@ def create_app() -> FastAPI:
             "groq_api": groq_status,
             "logfire": "configured" if settings.logfire_token else "not_configured",
         }
+
+    # Catch-all: log unmatched routes clearly instead of silent 404
+    @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)
+    async def catch_all(path: str, request: Request):
+        from fastapi.responses import JSONResponse
+        logger.warning("No route matched: %s %s — check your proxy webhook URL", request.method, request.url)
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"No route matched: {request.method} /{path}", "registered_webhook": "/api/v1/whatsapp/webhook"},
+        )
 
     return app
 

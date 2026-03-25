@@ -24,7 +24,7 @@ router = APIRouter(prefix="/onboarding", tags=["onboarding"])
 DbSessionDep = Annotated[AsyncSession, Depends(get_db)]
 CurrentUserDep = Annotated[User, Depends(require_auth_token)]
 
-_TRACKING_DOMAIN = "@track.tydline.com"
+_TRACKING_DOMAIN = ".track@tydline.com"
 
 
 class SetTrackingEmailBody(BaseModel):

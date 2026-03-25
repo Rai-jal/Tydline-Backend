@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # Frontend URL (used in magic link emails)
     frontend_url: str = "http://localhost:5173"
 
+    # Resend inbound webhook signing secret (starts with whsec_)
+    resend_webhook_secret: str | None = None
+
     # Moolre MoMo payment integration
     moolre_webhook_secret: str | None = None
     moolre_api_user: str | None = None

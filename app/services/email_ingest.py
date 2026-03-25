@@ -87,24 +87,86 @@ def _build_mem0_messages(
     ]
 
 
+def _normalize_payload(raw: dict[str, Any]) -> dict[str, Any]:
+    """
+    Normalize inbound webhook payloads from Resend or Postmark into a
+    common internal format.
+
+    Resend wraps the email inside a "data" key and uses snake_case fields.
+    Postmark sends the email at the top level with PascalCase fields.
+    """
+    # Resend: { "type": "email.received", "data": { "from": ..., "to": [...] } }
+    if "data" in raw and isinstance(raw["data"], dict):
+        data = raw["data"]
+        raw_from = data.get("from") or ""
+        # Parse "Name <email>" into name + address
+        from_name: str | None = None
+        from_email: str = raw_from.strip().lower()
+        if "<" in raw_from:
+            parts = raw_from.split("<", 1)
+            from_name = parts[0].strip().strip('"') or None
+            from_email = parts[1].rstrip(">").strip().lower()
+
+        # to can be a list or a single string
+        raw_to = data.get("to") or []
+        if isinstance(raw_to, list):
+            to_email = ", ".join(raw_to)
+            to_full = [{"Email": addr.strip()} for addr in raw_to]
+        else:
+            to_email = str(raw_to)
+            to_full = [{"Email": to_email}]
+
+        raw_cc = data.get("cc") or []
+        cc_full = [{"Email": addr.strip()} for addr in (raw_cc if isinstance(raw_cc, list) else [])]
+
+        return {
+            "_from_email": from_email,
+            "_from_name": from_name,
+            "_to_email": to_email,
+            "_to_full": to_full,
+            "_cc_full": cc_full,
+            "_subject": (data.get("subject") or "").strip(),
+            "_body_text": (data.get("text") or "").strip(),
+            "_body_html": (data.get("html") or "").strip() or None,
+            "_message_id": (data.get("message_id") or "").strip() or None,
+        }
+
+    # Postmark: top-level PascalCase fields
+    raw_from = raw.get("From") or ""
+    from_name = (raw.get("FromName") or "").strip() or None
+    from_email = raw_from.strip().lower()
+    if "<" in from_email:
+        from_email = from_email.split("<")[-1].rstrip(">").strip()
+
+    return {
+        "_from_email": from_email,
+        "_from_name": from_name,
+        "_to_email": (raw.get("To") or "").strip(),
+        "_to_full": raw.get("ToFull") or [],
+        "_cc_full": raw.get("CcFull") or [],
+        "_subject": (raw.get("Subject") or "").strip(),
+        "_body_text": (raw.get("TextBody") or "").strip(),
+        "_body_html": (raw.get("HtmlBody") or "").strip() or None,
+        "_message_id": (raw.get("MessageID") or "").strip() or None,
+    }
+
+
 async def process_inbound_email(
     session: AsyncSession,
     payload: dict[str, Any],
 ) -> InboundEmail:
     """
-    Parse *payload* (Postmark inbound JSON), match user, extract containers
-    and BL numbers, persist InboundEmail, and feed Mem0.
-
-    Postmark inbound fields used:
-      From, FromName, To, Subject, TextBody, HtmlBody, MessageID, Headers
+    Parse an inbound webhook payload from Resend or Postmark, match user,
+    extract container numbers, link to shipments, persist, and feed Mem0.
     """
-    from_email = (payload.get("From") or "").strip().lower()
-    to_email = (payload.get("To") or "").strip()
-    subject = (payload.get("Subject") or "").strip()
-    body_text = (payload.get("TextBody") or "").strip()
-    body_html = (payload.get("HtmlBody") or "").strip() or None
-    message_id = (payload.get("MessageID") or "").strip() or None
-    from_name = (payload.get("FromName") or "").strip() or None
+    n = _normalize_payload(payload)
+    from_email = n["_from_email"]
+    from_name = n["_from_name"]
+    to_email = n["_to_email"]
+    subject = n["_subject"]
+    body_text = n["_body_text"]
+    body_html = n["_body_html"]
+    message_id = n["_message_id"]
 
     # ------------------------------------------------------------------
     # 1. Deduplicate by MessageID
@@ -134,10 +196,10 @@ async def process_inbound_email(
 
     # Collect all recipient addresses from To, ToFull, Cc, CcFull
     all_recipient_addresses: list[str] = []
-    for entry in payload.get("ToFull") or []:
+    for entry in n["_to_full"]:
         if isinstance(entry, dict) and entry.get("Email"):
             all_recipient_addresses.append(_bare(entry["Email"]))
-    for entry in payload.get("CcFull") or []:
+    for entry in n["_cc_full"]:
         if isinstance(entry, dict) and entry.get("Email"):
             all_recipient_addresses.append(_bare(entry["Email"]))
     # Also include the raw To string as fallback
