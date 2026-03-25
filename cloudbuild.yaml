@@ -1,9 +1,12 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/tydeline-core:$COMMIT_SHA', '.']
+    args: ['build', '-t', 'gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID', '-t', 'gcr.io/$PROJECT_ID/tydeline-core:latest', '.']
 
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/tydeline-core:$COMMIT_SHA']
+    args: ['push', 'gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID']
+
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', 'gcr.io/$PROJECT_ID/tydeline-core:latest']
 
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
@@ -11,10 +14,11 @@ steps:
       - run
       - deploy
       - tydeline-core
-      - --image=gcr.io/$PROJECT_ID/tydeline-core:$COMMIT_SHA
+      - --image=gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID
       - --region=europe-west1
       - --platform=managed
       - --update-env-vars=EMAIL_FROM=$_EMAIL_FROM,CORS_ORIGINS=$_CORS_ORIGINS
 
 images:
-  - 'gcr.io/$PROJECT_ID/tydeline-core:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID'
+  - 'gcr.io/$PROJECT_ID/tydeline-core:latest'
