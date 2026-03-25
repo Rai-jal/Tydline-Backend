@@ -235,7 +235,12 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
         else:
             eta = str(eta_raw)
 
-    # --- Location / port of discharge ---
+    # --- Port of loading (origin) ---
+    pol = body.get("portOfLoading") or body.get("pol") or body.get("origin")
+    if isinstance(pol, dict):
+        pol = pol.get("name") or pol.get("portName") or pol.get("code")
+
+    # --- Port of discharge (destination) ---
     pod = body.get("portOfDischarge") or body.get("pod") or body.get("destination")
     if isinstance(pod, dict):
         pod = pod.get("name") or pod.get("portName") or pod.get("code")
@@ -268,6 +273,8 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
         "eta": eta,
         "predicted_eta": None,
         "vessel": vessel,
+        "origin": pol,
+        "destination": pod,
     }
 
 
@@ -422,6 +429,9 @@ async def _apply_tracking_update(
     status = tracking_data.get("status")
     eta_raw = tracking_data.get("eta")
     predicted_eta_raw = tracking_data.get("predicted_eta")
+    vessel = tracking_data.get("vessel")
+    origin = tracking_data.get("origin")
+    destination = tracking_data.get("destination")
 
     if status is not None:
         shipment.status = status
@@ -437,6 +447,13 @@ async def _apply_tracking_update(
             shipment.predicted_eta = datetime.fromisoformat(predicted_eta_raw)
         except (TypeError, ValueError):
             pass
+
+    if vessel is not None:
+        shipment.vessel = vessel
+    if origin is not None:
+        shipment.origin = origin
+    if destination is not None:
+        shipment.destination = destination
 
     shipment.last_updated = datetime.now(timezone.utc)
 

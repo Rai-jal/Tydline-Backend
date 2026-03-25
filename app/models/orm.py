@@ -59,6 +59,9 @@ class Shipment(Base):
     last_updated: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    vessel: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    origin: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    destination: Mapped[str | None] = mapped_column(String(128), nullable=True)
     demurrage_risk: Mapped[str | None] = mapped_column(String(16), nullable=True)
     free_days_remaining: Mapped[int | None] = mapped_column(nullable=True)
     timeline_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
