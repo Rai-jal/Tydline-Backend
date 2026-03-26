@@ -375,11 +375,14 @@ async def _do_fetch(
         raw = await _fetch_shipment_tracking(shipment_id)
 
         # Retry if: no data returned (404/error), OR ShipsGo returned a "NEW" stub
-        # (freshly registered shipment that hasn't been processed yet)
-        _is_stub = (
-            raw is not None
-            and (raw.get("shipment") or raw.get("data") or raw).get("status") in ("NEW", None)
-            and not (raw.get("shipment") or raw.get("data") or raw).get("route")
+        # (freshly registered shipment that hasn't been processed yet).
+        # "NEW" is always a stub regardless of route presence; None status is a stub only
+        # when no route is present.
+        _body = (raw.get("shipment") or raw.get("data") or raw) if raw is not None else {}
+        _status = _body.get("status")
+        _is_stub = raw is not None and (
+            _status == "NEW"
+            or (_status is None and not _body.get("route"))
         )
 
         if raw is None or _is_stub:
@@ -540,7 +543,8 @@ async def _apply_tracking_update(
     origin = tracking_data.get("origin")
     destination = tracking_data.get("destination")
 
-    if status is not None:
+    # "NEW" is a ShipsGo-internal stub status — never write it to the DB
+    if status is not None and status != "NEW":
         shipment.status = status
 
     if eta_raw is not None:

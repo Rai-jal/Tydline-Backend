@@ -69,7 +69,10 @@ async def run_tracker_cycle() -> None:
                     skipped += 1
                     continue
 
-                tracking_data = await fetch_container_tracking_data(reference)
+                tracking_data = await fetch_container_tracking_data(
+                    reference,
+                    shipsgo_id_hint=shipment.shipsgo_shipment_id,
+                )
                 if not tracking_data:
                     skipped += 1
                     continue
