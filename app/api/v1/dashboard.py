@@ -259,7 +259,29 @@ async def notify_me_when_ready(
     if shipment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
 
-    shipment.notify_email = payload.email.strip()
+    email = payload.email.strip()
+    has_real_data = bool(shipment.vessel or shipment.origin or shipment.destination)
+
+    if has_real_data:
+        # Data already available — send the notification immediately
+        from app.services.email import send_email
+        reference = shipment.container_number or shipment.bill_of_lading or ""
+        await send_email(
+            to=email,
+            subject=f"Live tracking data is available for {reference}",
+            text_body=(
+                f"Good news! Live tracking data is already available for {reference}.\n\n"
+                f"Status: {shipment.status or 'In progress'}\n"
+                f"Vessel: {shipment.vessel or 'Not yet available'}\n"
+                f"Origin: {shipment.origin or 'Not yet available'}\n"
+                f"Destination: {shipment.destination or 'Not yet available'}\n"
+                f"ETA: {shipment.eta.strftime('%d %b %Y') if shipment.eta else 'Not yet available'}\n\n"
+                "Log in to your Tydline dashboard to see the full details."
+            ),
+        )
+        return {"status": "sent"}
+
+    shipment.notify_email = email
     db.add(shipment)
     await db.commit()
     return {"status": "saved"}
