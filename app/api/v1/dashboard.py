@@ -179,38 +179,58 @@ async def submit_shipment(
     Submit a shipment for tracking.
     Creates it with tracking_started status and immediately kicks off tracking.
     """
-    # Duplicate check: same BL, same container number, or BL field contains a container number
-    from sqlalchemy import or_
-    dup_filter = [Shipment.bill_of_lading == payload.bill_of_lading]
-    if payload.container_number:
-        dup_filter.append(Shipment.container_number == payload.container_number)
-    # User may enter a container number in the BL field — catch that too
-    if _CONTAINER_RE.match(payload.bill_of_lading):
-        dup_filter.append(Shipment.container_number == payload.bill_of_lading)
-    existing_result = await db.execute(
-        select(Shipment).where(
-            Shipment.user_id == current_user.id,
-            or_(*dup_filter),
-        )
-    )
-    existing_shipment = existing_result.scalar_one_or_none()
-    if existing_shipment is not None:
-        # Return the existing shipment so the frontend shows its current state
-        return ShipmentSubmitResponse(id=existing_shipment.id, status=existing_shipment.status)
-
     # If the user entered a container number in the BL field, move it to the right field
+    from sqlalchemy import or_
     container_number = payload.container_number
     bill_of_lading = payload.bill_of_lading
     if not container_number and _CONTAINER_RE.match(bill_of_lading):
         container_number = bill_of_lading
         bill_of_lading = None
 
+    # Duplicate check: same BL or same container number, scoped to this user
+    dup_filter = []
+    if bill_of_lading:
+        dup_filter.append(Shipment.bill_of_lading == bill_of_lading)
+    if container_number:
+        dup_filter.append(Shipment.container_number == container_number)
+    if dup_filter:
+        existing_result = await db.execute(
+            select(Shipment).where(
+                Shipment.user_id == current_user.id,
+                or_(*dup_filter),
+            )
+        )
+        existing_shipment = existing_result.scalar_one_or_none()
+        if existing_shipment is not None:
+            return ShipmentSubmitResponse(id=existing_shipment.id, status=existing_shipment.status)
+
+    # Check if any other user already has live tracking data for this container.
+    # If so, copy it immediately so the frontend shows real data without waiting
+    # for a background ShipsGo fetch (which may be slow or credit-limited).
+    seed: Shipment | None = None
+    if container_number:
+        seed_result = await db.execute(
+            select(Shipment).where(
+                Shipment.container_number == container_number,
+                Shipment.user_id != current_user.id,
+                Shipment.vessel.isnot(None),
+            ).limit(1)
+        )
+        seed = seed_result.scalar_one_or_none()
+
     shipment = Shipment(
         container_number=container_number,
         bill_of_lading=bill_of_lading,
-        carrier=payload.carrier,
+        carrier=payload.carrier or (seed.carrier if seed else None),
         user_id=current_user.id,
-        status="tracking_started",
+        status=seed.status if seed else "tracking_started",
+        vessel=seed.vessel if seed else None,
+        origin=seed.origin if seed else None,
+        destination=seed.destination if seed else None,
+        eta=seed.eta if seed else None,
+        predicted_eta=seed.predicted_eta if seed else None,
+        demurrage_risk=seed.demurrage_risk if seed else None,
+        shipsgo_shipment_id=seed.shipsgo_shipment_id if seed else None,
     )
     db.add(shipment)
     await db.commit()

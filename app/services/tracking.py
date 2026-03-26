@@ -457,6 +457,10 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
         if not reference:
             return
 
+        # Skip fetch if live data was already seeded at creation time
+        if shipment.vessel and shipment.origin and shipment.destination:
+            return
+
         # Reuse a known ShipsGo ID from any shipment for the same container (cross-user)
         shipsgo_id_hint = shipment.shipsgo_shipment_id
         if not shipsgo_id_hint:
