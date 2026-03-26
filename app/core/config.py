@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = []
 
     # ShipsGo container tracking API
-    shipsgo_api_base_url: str = "https://api.shipsgo.com"
+    shipsgo_api_base_url: str = "https://api.shipsgo.com/v2"
     shipsgo_api_key: str | None = None
 
     # Fallback generic tracking vars (optional; ShipsGo takes precedence)

@@ -486,7 +486,7 @@ async def refresh_all_active_shipments() -> None:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(orm.Shipment).where(
-                orm.Shipment.status.not_in(["delivered", "cancelled"])
+                orm.Shipment.status.not_in(["delivered", "cancelled", "arrived", "completed"])
             )
         )
         shipments = result.scalars().all()
