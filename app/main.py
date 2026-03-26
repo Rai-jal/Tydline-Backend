@@ -95,7 +95,7 @@ def create_app() -> FastAPI:
         """
         db_status = "unknown"
         shipsgo_status = "unknown"
-        groq_status = "unknown"
+        openai_status = "unknown"
 
         # DB
         try:
@@ -121,21 +121,20 @@ def create_app() -> FastAPI:
         else:
             shipsgo_status = "not_configured"
 
-        # Groq (optional, only if configured)
-        groq_api_key = getattr(settings, "groq_api_key", None)
-        if groq_api_key:
+        # OpenAI (primary AI provider)
+        if settings.openai_api_key:
             try:
                 async with httpx.AsyncClient(timeout=3.0) as client:
                     resp = await client.get(
-                        "https://api.groq.com/openai/v1/models",
-                        headers={"Authorization": f"Bearer {groq_api_key}"},
+                        "https://api.openai.com/v1/models",
+                        headers={"Authorization": f"Bearer {settings.openai_api_key}"},
                     )
-                groq_status = "reachable" if resp.status_code < 500 else "error"
+                openai_status = "reachable" if resp.status_code < 500 else "error"
             except Exception as exc:
-                logger.warning("Health check Groq failed: %s", exc)
-                groq_status = "error"
+                logger.warning("Health check OpenAI failed: %s", exc)
+                openai_status = "error"
         else:
-            groq_status = "not_configured"
+            openai_status = "not_configured"
 
         overall = "ok" if db_status == "connected" else "degraded"
 
@@ -144,7 +143,7 @@ def create_app() -> FastAPI:
             "environment": settings.environment,
             "database": db_status,
             "shipsgo_api": shipsgo_status,
-            "groq_api": groq_status,
+            "openai_api": openai_status,
             "logfire": "configured" if settings.logfire_token else "not_configured",
         }
 

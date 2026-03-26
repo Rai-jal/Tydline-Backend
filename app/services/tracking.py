@@ -200,12 +200,12 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
     Normalize ShipsGo v2 /ocean/shipments/{id} response into the standard
     TydLine tracking shape.
 
-    ShipsGo ocean response fields (flexible — handles both camelCase and snake_case):
-      status / containerStatus / container_status
-      arrivalDate / arrival_date / eta / estimated_arrival
-      vessel / vesselName / vessel_name
-      portOfDischarge / pod / destination / location
-      events / milestones / movements
+    ShipsGo v2 actual structure:
+      shipment.status
+      shipment.route.port_of_loading.location.name  → origin
+      shipment.route.port_of_discharge.location.name → destination
+      shipment.route.port_of_discharge.date_of_discharge → eta
+      shipment.containers[].movements[].vessel.name  → vessel (latest with a name)
     """
     data = raw if isinstance(raw, dict) else {}
 
@@ -221,9 +221,38 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
         or body.get("shipment_status")
     )
 
-    # --- ETA / arrival date ---
-    eta_raw = (
-        body.get("arrivalDate")
+    # --- Route block (ShipsGo v2) ---
+    route = body.get("route") or {}
+
+    pol_block = route.get("port_of_loading") or {}
+    pol_loc = pol_block.get("location") or {}
+    pol: str | None = pol_loc.get("name") or pol_loc.get("code")
+    # Flat fallbacks for other providers
+    if not pol:
+        pol_raw = body.get("portOfLoading") or body.get("pol") or body.get("origin")
+        if isinstance(pol_raw, dict):
+            pol = pol_raw.get("name") or pol_raw.get("portName") or pol_raw.get("code")
+        elif isinstance(pol_raw, str):
+            pol = pol_raw
+
+    pod_block = route.get("port_of_discharge") or {}
+    pod_loc = pod_block.get("location") or {}
+    pod: str | None = pod_loc.get("name") or pod_loc.get("code")
+    # Flat fallbacks
+    if not pod:
+        pod_raw = body.get("portOfDischarge") or body.get("pod") or body.get("destination")
+        if isinstance(pod_raw, dict):
+            pod = pod_raw.get("name") or pod_raw.get("portName") or pod_raw.get("code")
+        elif isinstance(pod_raw, str):
+            pod = pod_raw
+
+    location = pod or body.get("location") or body.get("currentLocation")
+
+    # --- ETA: ShipsGo v2 stores it on the discharge block ---
+    eta_raw: str | None = (
+        pod_block.get("date_of_discharge")
+        or pod_block.get("date_of_discharge_initial")
+        or body.get("arrivalDate")
         or body.get("arrival_date")
         or body.get("eta")
         or body.get("estimatedArrival")
@@ -239,36 +268,51 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
         else:
             eta = str(eta_raw)
 
-    # --- Port of loading (origin) ---
-    pol = body.get("portOfLoading") or body.get("pol") or body.get("origin")
-    if isinstance(pol, dict):
-        pol = pol.get("name") or pol.get("portName") or pol.get("code")
+    # --- Vessel: find the latest movement with a vessel name for this container ---
+    vessel: str | None = None
+    containers = body.get("containers") or []
+    # Prefer the specific container; fall back to any container in the shipment
+    target_containers = [
+        c for c in containers
+        if isinstance(c, dict) and c.get("number") == container_number
+    ] or [c for c in containers if isinstance(c, dict)]
 
-    # --- Port of discharge (destination) ---
-    pod = body.get("portOfDischarge") or body.get("pod") or body.get("destination")
-    if isinstance(pod, dict):
-        pod = pod.get("name") or pod.get("portName") or pod.get("code")
-    location = pod or body.get("location") or body.get("currentLocation")
+    for container in target_containers:
+        movements = container.get("movements") or []
+        for movement in reversed(movements):  # latest first
+            if not isinstance(movement, dict):
+                continue
+            v = movement.get("vessel")
+            if isinstance(v, dict):
+                name = v.get("name")
+                if name:
+                    vessel = name
+                    break
+            elif isinstance(v, str) and v:
+                vessel = v
+                break
+        if vessel:
+            break
 
-    # --- Vessel ---
-    vessel = body.get("vessel") or body.get("vesselName") or body.get("vessel_name")
-    if isinstance(vessel, dict):
-        vessel = (
-            vessel.get("name")
-            or vessel.get("vesselName")
-            or vessel.get("vessel_name")
-        )
+    # Flat vessel fallback for other providers
+    if not vessel:
+        v_raw = body.get("vessel") or body.get("vesselName") or body.get("vessel_name")
+        if isinstance(v_raw, dict):
+            vessel = v_raw.get("name") or v_raw.get("vesselName") or v_raw.get("vessel_name")
+        elif isinstance(v_raw, str):
+            vessel = v_raw
 
     # --- Latest event as status fallback ---
-    events = body.get("events") or body.get("milestones") or body.get("movements") or []
-    if not status and events:
-        latest = events[0] if isinstance(events[0], dict) else {}
-        status = (
-            latest.get("event")
-            or latest.get("eventType")
-            or latest.get("status")
-            or latest.get("description")
-        )
+    if not status and target_containers:
+        movements = target_containers[0].get("movements") or []
+        if movements and isinstance(movements[0], dict):
+            latest = movements[0]
+            status = (
+                latest.get("event")
+                or latest.get("eventType")
+                or latest.get("status")
+                or latest.get("description")
+            )
 
     return {
         "container_number": container_number,
@@ -286,25 +330,36 @@ def _normalize_ocean_response(container_number: str, raw: dict[str, Any]) -> dic
 # Public API
 # ---------------------------------------------------------------------------
 
-async def fetch_container_tracking_data(container_number: str) -> dict[str, Any]:
+async def fetch_container_tracking_data(
+    container_number: str,
+    shipsgo_id_hint: str | None = None,
+) -> dict[str, Any]:
     """
     Fetch container tracking data using the ShipsGo v2 two-step flow:
       1. Register container → get shipment_id  (cached after first call)
       2. Fetch tracking via shipment_id
 
+    shipsgo_id_hint: previously persisted ShipsGo shipment_id (avoids re-registration).
     Falls back to a generic provider if ShipsGo is not configured.
     Returns a normalized dict: container_number, status, location, eta, vessel.
+    The dict may include '_shipsgo_id' with the used shipment_id for persistence.
     """
-    return await _do_fetch(container_number)
+    return await _do_fetch(container_number, shipsgo_id_hint=shipsgo_id_hint)
 
 
-async def _do_fetch(container_number: str) -> dict[str, Any]:
+async def _do_fetch(
+    container_number: str,
+    shipsgo_id_hint: str | None = None,
+) -> dict[str, Any]:
     """Internal: execute the ShipsGo two-step flow or fall back to generic provider."""
 
     # ---- ShipsGo path ----
     if settings.shipsgo_api_key:
-        # Step 1: get or register shipment_id
-        shipment_id = _shipsgo_id_cache.get(container_number)
+        # Step 1: resolve shipment_id — DB hint > in-memory cache > register (POST)
+        shipment_id = (
+            shipsgo_id_hint
+            or _shipsgo_id_cache.get(container_number)
+        )
 
         if not shipment_id:
             shipment_id = await _register_container(container_number)
@@ -312,14 +367,24 @@ async def _do_fetch(container_number: str) -> dict[str, Any]:
                 _shipsgo_id_cache[container_number] = shipment_id
             else:
                 return {}
+        else:
+            # Warm the in-memory cache so subsequent calls in the same process skip the hint
+            _shipsgo_id_cache[container_number] = shipment_id
 
         # Step 2: fetch tracking data
         raw = await _fetch_shipment_tracking(shipment_id)
 
-        if raw is None:
-            # shipment_id may be stale (e.g. ShipsGo re-indexed) — clear cache and retry once
+        # Retry if: no data returned (404/error), OR ShipsGo returned a "NEW" stub
+        # (freshly registered shipment that hasn't been processed yet)
+        _is_stub = (
+            raw is not None
+            and (raw.get("shipment") or raw.get("data") or raw).get("status") in ("NEW", None)
+            and not (raw.get("shipment") or raw.get("data") or raw).get("route")
+        )
+
+        if raw is None or _is_stub:
             logger.info(
-                "shipsgo shipment_id=%s returned no data for %s, retrying registration",
+                "shipsgo shipment_id=%s returned stub/no data for %s, retrying registration",
                 shipment_id, container_number,
             )
             _shipsgo_id_cache.pop(container_number, None)
@@ -333,6 +398,7 @@ async def _do_fetch(container_number: str) -> dict[str, Any]:
 
         normalized = _normalize_ocean_response(container_number, raw)
         normalized["_raw"] = raw
+        normalized["_shipsgo_id"] = shipment_id
         return normalized
 
     # ---- Generic fallback provider ----
@@ -388,7 +454,10 @@ async def initial_track_shipment(shipment_id: uuid.UUID) -> None:
         if not reference:
             return
 
-        tracking_data = await fetch_container_tracking_data(reference)
+        tracking_data = await fetch_container_tracking_data(
+            reference,
+            shipsgo_id_hint=shipment.shipsgo_shipment_id,
+        )
         if not tracking_data:
             return
 
@@ -412,7 +481,10 @@ async def refresh_all_active_shipments() -> None:
             if not reference:
                 continue
 
-            tracking_data = await fetch_container_tracking_data(reference)
+            tracking_data = await fetch_container_tracking_data(
+                reference,
+                shipsgo_id_hint=shipment.shipsgo_shipment_id,
+            )
             if not tracking_data:
                 continue
 
@@ -466,6 +538,10 @@ async def _apply_tracking_update(
         shipment.destination = destination
 
     shipment.last_updated = datetime.now(timezone.utc)
+
+    shipsgo_id = tracking_data.pop("_shipsgo_id", None)
+    if shipsgo_id and not shipment.shipsgo_shipment_id:
+        shipment.shipsgo_shipment_id = shipsgo_id
 
     raw_tracking = tracking_data.pop("_raw", {})
 

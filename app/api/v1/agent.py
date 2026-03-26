@@ -52,6 +52,6 @@ async def agent_chat(
     if reply is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Agent not available. Set GROQ_API_KEY and ensure pydantic-ai is installed.",
+            detail="Agent not available. Set OPENAI_API_KEY and ensure pydantic-ai is installed.",
         )
     return AgentChatResponse(reply=reply)

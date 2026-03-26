@@ -43,12 +43,13 @@ def _get_sync_db_url() -> str:
 
 
 def _build_memory() -> Any:
-    """Build and return a configured mem0.Memory instance."""
-    if not settings.groq_api_key:
-        logger.warning("GROQ_API_KEY not set — mem0 Memory unavailable")
-        return None
+    """Build and return a configured mem0.Memory instance.
+
+    LLM priority: OpenAI (primary) → Groq (fallback if OpenAI unavailable).
+    Embeddings always use OpenAI text-embedding-3-small.
+    """
     if not settings.openai_api_key:
-        logger.warning("OPENAI_API_KEY not set — mem0 Memory unavailable (needed for embeddings)")
+        logger.warning("OPENAI_API_KEY not set — mem0 Memory unavailable")
         return None
     try:
         from mem0 import Memory
@@ -59,18 +60,20 @@ def _build_memory() -> Any:
             VectorStoreConfig,
         )
 
-        config = MemoryConfig(
-            vector_store=VectorStoreConfig(
-                provider="pgvector",
+        # Use OpenAI as primary LLM; fall back to Groq if OpenAI key is absent
+        if settings.openai_api_key:
+            llm_config = LlmConfig(
+                provider="openai",
                 config={
-                    "connection_string": _get_sync_db_url(),
-                    "collection_name": "tydline_memories",
-                    # Must match text-embedding-3-small output dimensions
-                    "embedding_model_dims": 1536,
-                    "hnsw": True,
+                    "model": settings.openai_model,
+                    "api_key": settings.openai_api_key,
+                    "temperature": 0.0,
+                    "max_tokens": 1500,
                 },
-            ),
-            llm=LlmConfig(
+            )
+            logger.info("mem0 using OpenAI as LLM for fact extraction")
+        else:
+            llm_config = LlmConfig(
                 provider="groq",
                 config={
                     "model": settings.groq_model,
@@ -78,7 +81,20 @@ def _build_memory() -> Any:
                     "temperature": 0.0,
                     "max_tokens": 1500,
                 },
+            )
+            logger.info("mem0 using Groq as fallback LLM for fact extraction")
+
+        config = MemoryConfig(
+            vector_store=VectorStoreConfig(
+                provider="pgvector",
+                config={
+                    "connection_string": _get_sync_db_url(),
+                    "collection_name": "tydline_memories",
+                    "embedding_model_dims": 1536,
+                    "hnsw": True,
+                },
             ),
+            llm=llm_config,
             embedder=EmbedderConfig(
                 provider="openai",
                 config={

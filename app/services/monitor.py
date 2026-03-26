@@ -10,7 +10,7 @@ This service is responsible for:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,19 +48,27 @@ async def apply_and_monitor_shipment_update(
     status = tracking_data.get("status") or previous_status
     eta_raw = tracking_data.get("eta")
     eta = _parse_eta(eta_raw) if eta_raw is not None else previous_eta
+    vessel = tracking_data.get("vessel")
+    origin = tracking_data.get("origin")
+    destination = tracking_data.get("destination")
 
     status_changed = status != previous_status
     eta_changed = eta is not None and eta != previous_eta
 
     if status_changed:
         shipment.status = status
-
     if eta_changed:
         shipment.eta = eta
+    if vessel is not None:
+        shipment.vessel = vessel
+    if origin is not None:
+        shipment.origin = origin
+    if destination is not None:
+        shipment.destination = destination
 
-    if status_changed or eta_changed:
-        await session.commit()
-        await session.refresh(shipment)
+    shipment.last_updated = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(shipment)
 
     if status_changed:
         await send_shipment_status_change_notification(

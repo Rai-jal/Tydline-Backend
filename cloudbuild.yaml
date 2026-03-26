@@ -13,12 +13,13 @@ steps:
     args:
       - run
       - deploy
-      - tydeline-core
+      - tydline-core
       - --image=gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID
       - --region=europe-west1
       - --platform=managed
-      - --update-env-vars=EMAIL_FROM=$_EMAIL_FROM,CORS_ORIGINS=$_CORS_ORIGINS
+      - --update-env-vars=EMAIL_FROM=$_EMAIL_FROM
 
 images:
   - 'gcr.io/$PROJECT_ID/tydeline-core:$BUILD_ID'
   - 'gcr.io/$PROJECT_ID/tydeline-core:latest'
+  
